@@ -1,0 +1,6 @@
+message Msg {
+  required string content = 1;
+  required string sender = 2;
+  required string timestamp = 3;
+}
+
