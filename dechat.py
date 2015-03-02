@@ -1,4 +1,4 @@
-"""Decentralized chat example"""
+"""Simple chat using a PUB-SUB pattern."""
 
 import argparse
 import os
@@ -7,86 +7,80 @@ from threading import Thread
 import time
 from datetime import datetime
 import redis
-
 from netifaces import interfaces, ifaddresses, AF_INET
-
 import zmq
 
-rds = redis.StrictRedis(host='localhost', port=6379, db=0)
-
+# redis is used to log the messages exchanged in the chat.
+msg_logs = redis.StrictRedis(host='127.0.0.1', port=6379, db=0)
+# NOTE
+# msg_logs = redis.StrictRedis(host='localhost', port=6379, db=0)
+# on linux, 'localhost' doesn't write to redis
 
 def send_pb(socket, sender, msg, flags=0, protocol=-1):
-    pbmsg = msg_pb2.Msg()
-    pbmsg.content = msg
-    pbmsg.sender = sender
-    ts = time.time()
-    timestamp = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-    pbmsg.timestamp = timestamp
-    rds.rpush('chat_logs',
-              '[%s] %s: %s' % (pbmsg.timestamp, pbmsg.sender, pbmsg.content))
-    return socket.send(pbmsg.SerializeToString(), flags=flags)
+    """sends a protocol buffer of the message and logs it.""" 
+    # Compose message with sender, content, and timestamp. """
+    pb_data = msg_pb2.Msg() 
+    pb_data.timestamp = datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+    pb_data.sender = sender
+    pb_data.content = msg
+    # Write information to a log (redis) 
+    msg_logs.rpush('chat_logs',
+              '[%s] %s: %s' % (pb_data.timestamp, pb_data.sender, pb_data.content))
+    # Serialize message
+    return socket.send(pb_data.SerializeToString(), flags=flags)
 
 
 def recv_pb(socket, flags=0, protocol=-1):
-    pbmsg = msg_pb2.Msg()
-    pbmsg.ParseFromString(socket.recv(flags))
-    return '[%s] %s: %s' % (pbmsg.timestamp, pbmsg.sender, pbmsg.content)
+    """receives a protocol buffer of the message."""
+    # Parse message
+    pb_data = msg_pb2.Msg()
+    pb_data.ParseFromString(socket.recv(flags))
+    return '[%s] %s: %s' % (pb_data.timestamp, pb_data.sender, pb_data.content)
 
 
-def listen(ip, port_st, port_nd):
-    """listen for messages
-
-    masked is the first three parts of an IP address:
-
-        192.168.1
-
-    The socket will connect to all of X.Y.Z.{1-254}.
-    """
+def listen(ip, first_port, last_port):
+    """listen for messages from one IP address and a range of ports."""
     ctx = zmq.Context.instance()
-    listener = ctx.socket(zmq.SUB)
-    for port in range(int(port_st), int(port_nd)+1):
-        listener.connect("tcp://{0}:{1}".format(ip, port))
+    receiver = ctx.socket(zmq.SUB)
+    for port in range(first_port, last_port+1):
+        receiver.connect("tcp://{0}:{1}".format(ip, port))
 
-    listener.setsockopt(zmq.SUBSCRIBE, b'')
+    receiver.setsockopt(zmq.SUBSCRIBE, b'')
     while True:
         try:
-            print(recv_pb(listener))
+            print(recv_pb(receiver))
         except (KeyboardInterrupt, zmq.ContextTerminated):
             break
 
-
 def main():
+    ip = '127.0.0.1'	 # hard-coded to ease up testing
+    first_port, last_port = 9000, 9100
     parser = argparse.ArgumentParser()
-    # parser.add_argument("interface", type=str, help="the network interface",
-    #                     choices=interfaces(),)
-    parser.add_argument("sip", type=str, help="the ip of the self",)
-    parser.add_argument("sport", type=str, help="the port of the self",)
-    parser.add_argument("dip", type=str, help="the ip of the peer",)
-    parser.add_argument("dport_st", type=str,
-                        help="the start port of the peers",)
-    parser.add_argument("dport_nd", type=str,
-                        help="the end port of the peers",)
-    parser.add_argument("user", type=str, default=os.environ['USER'],
+    parser.add_argument("port", type=int, 
+                        help="my port number (from %d to %d)" 
+                             % (first_port, last_port),) 
+    parser.add_argument("usr", type=str, default=os.environ['USER'],
                         nargs='?',
-                        help="Your username",)
+                        help="my user name",)
     args = parser.parse_args()
 
     ctx = zmq.Context.instance()
 
+    # Extra thread for listening
     listen_thread = Thread(target=listen,
-                           args=(args.dip, args.dport_st, args.dport_nd))
+                           args=(ip, first_port, last_port))
     listen_thread.start()
 
-    bcast = ctx.socket(zmq.PUB)
-    bcast.bind("tcp://%s:%s" % (args.sip, args.sport))
-    # print("starting chat on %s:9000" % (args.interface))
+    # Main thread for broadcasting
+    sender = ctx.socket(zmq.PUB)
+    sender.bind("tcp://%s:%s" % (ip, args.port))
     while True:
         try:
             msg = raw_input('>')
-            send_pb(bcast, args.user, msg)
+            send_pb(sender, args.usr, msg)
         except KeyboardInterrupt:
             break
-    bcast.close(linger=0)
+    sender.close(linger=0)
     ctx.term()
 
 if __name__ == '__main__':
