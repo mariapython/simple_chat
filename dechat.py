@@ -10,6 +10,11 @@ import redis
 from netifaces import interfaces, ifaddresses, AF_INET
 import zmq
 
+try:
+    raw_input          # Python 2
+except NameError:
+    raw_input = input  # Python 3
+
 # redis is used to log the messages exchanged in the chat.
 msg_logs = redis.StrictRedis(host='127.0.0.1', port=6379, db=0)
 # NOTE
